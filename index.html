@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UNERI Flow - Self-Organizing Prototype</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #050508;
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      color: #e0e5ff;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      touch-action: none;
+    }
+    #ui-container {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      z-index: 10;
+      background: rgba(10, 12, 24, 0.65);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 16px 20px;
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      max-width: 320px;
+    }
+    h1 {
+      font-size: 16px;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+      color: #a5b4fc;
+    }
+    .control-group {
+      margin-bottom: 10px;
+    }
+    label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 4px;
+    }
+    input[type=range] {
+      width: 100%;
+      accent-color: #6366f1;
+      cursor: pointer;
+    }
+    .stats {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 11px;
+      color: #64748b;
+      display: flex;
+      justify-content: space-between;
+    }
+    #audio-btn {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      z-index: 10;
+      background: rgba(99, 102, 241, 0.2);
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      color: #c7d2fe;
+      padding: 10px 18px;
+      border-radius: 20px;
+      font-size: 12px;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      transition: all 0.2s ease;
+    }
+    #audio-btn:hover {
+      background: rgba(99, 102, 241, 0.4);
+      color: #ffffff;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="ui-container">
+    <h1>UNERI Flow Simulation</h1>
+    <div class="control-group">
+      <label><span>Reactivity (反応度)</span><span id="val-react">1.0</span></label>
+      <input type="range" id="slider-react" min="0.2" max="3.0" step="0.1" value="1.0">
+    </div>
+    <div class="control-group">
+      <label><span>Dissipation (散逸粘性)</span><span id="val-visc">0.98</span></label>
+      <input type="range" id="slider-visc" min="0.90" max="0.999" step="0.001" value="0.980">
+    </div>
+    <div class="stats">
+      <span>Particles: <strong id="stat-count" style="color:#a5b4fc">0</strong></span>
+      <span>System Energy: <strong id="stat-energy" style="color:#a5b4fc">0</strong></span>
+    </div>
+  </div>
+
+  <button id="audio-btn">Sound Off / Click to Start Audio</button>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    // ==========================================
+    // オーディオ設定 (Web Audio API)
+    // ==========================================
+    let audioCtx = null;
+    let isAudioActive = false;
+
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      isAudioActive = !isAudioActive;
+      document.getElementById('audio-btn').innerText = isAudioActive ? "Sound On" : "Sound Off";
+    }
+
+    document.getElementById('audio-btn').addEventListener('click', initAudio);
+
+    function triggerSynthSound(freq, duration, gainVal) {
+      if (!isAudioActive || !audioCtx) return;
+      try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        
+        gain.gain.setValueAtTime(gainVal * 0.1, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+      } catch (e) {}
+    }
+
+    // ==========================================
+    // キャンバス・環境初期化
+    // ==========================================
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let width = canvas.width = window.innerWidth;
+    let height = canvas.height = window.innerHeight;
+
+    window.addEventListener('resize', () => {
+      width = canvas.width = window.innerWidth;
+      height = canvas.height = window.innerHeight;
+      initHeatField();
+    });
+
+    // パラメータ
+    let reactivityFactor = 1.0;
+    let spatialDamping = 0.98;
+
+    document.getElementById('slider-react').addEventListener('input', (e) => {
+      reactivityFactor = parseFloat(e.target.value);
+      document.getElementById('val-react').innerText = reactivityFactor.toFixed(1);
+    });
+    document.getElementById('slider-visc').addEventListener('input', (e) => {
+      spatialDamping = parseFloat(e.target.value);
+      document.getElementById('val-visc').innerText = spatialDamping.toFixed(3);
+    });
+
+    // ==========================================
+    // 【追加構造】運動熱場（Heat Field）のグリッド設定
+    // ==========================================
+    const GRID_SIZE = 24;
+    let gridCols = Math.ceil(width / GRID_SIZE);
+    let gridRows = Math.ceil(height / GRID_SIZE);
+    let fieldHeatMap = [];
+
+    function initHeatField() {
+      gridCols = Math.ceil(width / GRID_SIZE);
+      gridRows = Math.ceil(height / GRID_SIZE);
+      fieldHeatMap = new Array(gridCols);
+      for (let x = 0; x < gridCols; x++) {
+        fieldHeatMap[x] = new Float32Array(gridRows);
+      }
+    }
+    initHeatField();
+
+    // ==========================================
+    // チビ粒子クラス (ChibiParticle)
+    // ==========================================
+    class ChibiParticle {
+      constructor(x, y, vx = 0, vy = 0, scale = 1.0, hue = 220) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.baseRadius = 4;
+        this.scale = scale;
+        this.hue = hue;
+        
+        this.isMerged = scale > 1.2;
+        this.life = 1.0; 
+        this.decayRate = 0.0008 / scale;
+        this.cooldown = 20; // 融合後すぐの連続融合を防止
+      }
+
+      get radius() {
+        return this.baseRadius * this.scale;
+      }
+
+      get speed() {
+        return Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+      }
+
+      update(particles) {
+        if (this.cooldown > 0) this.cooldown--;
+
+        // 摩擦・空間減衰（速度＝運動エネルギーの基礎）
+        this.vx *= spatialDamping;
+        this.vy *= spatialDamping;
+
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // 壁面の反射
+        if (this.x < this.radius) { this.x = this.radius; this.vx *= -0.8; }
+        if (this.x > width - this.radius) { this.x = width - this.radius; this.vx *= -0.8; }
+        if (this.y < this.radius) { this.y = this.radius; this.vy *= -0.8; }
+        if (this.y > height - this.radius) { this.y = height - this.radius; this.vy *= -0.8; }
+
+        // 自然減衰
+        this.life -= this.decayRate;
+
+        // ----------------------------------------------------
+        // 【追加仕様1: 散逸構造プロセス】運動熱場への散逸と動的平衡
+        // ----------------------------------------------------
+        const gx = Math.floor(this.x / GRID_SIZE);
+        const gy = Math.floor(this.y / GRID_SIZE);
+
+        if (gx >= 0 && gx < gridCols && gy >= 0 && gy < gridRows) {
+          // 自身の運動速度を熱として周囲の空間（場）へ還元（散逸）
+          fieldHeatMap[gx][gy] += this.speed * 0.12;
+
+          // 場の熱量（周囲の活性度）によるフィードバック
+          const localHeat = fieldHeatMap[gx][gy];
+          if (localHeat > 1.5) {
+            // 熱が高い（仲間が多く動いている）場所では減衰が和らぎ、運動が自己持続する
+            const boost = Math.min(localHeat * 0.0008, 0.015);
+            this.vx *= (1 + boost);
+            this.vy *= (1 + boost);
+            this.life += 0.0003; // 命の持続（定常構造の発現）
+          }
+        }
+
+        // ----------------------------------------------------
+        // 【追加仕様2: ホロンプロセス】マクロとミクロの相互フィードバック
+        // ----------------------------------------------------
+        if (this.isMerged || this.scale > 1.4) {
+          // 全体（マクロな融合粒子）が一部（ミクロな小粒子）を手繰り寄せ、運動を与える
+          const influenceRadius = 160 * this.scale;
+          const inflSq = influenceRadius * influenceRadius;
+
+          for (let i = 0; i < particles.length; i++) {
+            const other = particles[i];
+            if (other === this || other.isMerged) continue;
+
+            const dx = this.x - other.x;
+            const dy = this.y - other.y;
+            const distSq = dx * dx + dy * dy;
+
+            if (distSq < inflSq && distSq > 400) {
+              const dist = Math.sqrt(distSq);
+              const pullForce = (1 - dist / influenceRadius) * 0.06 * reactivityFactor;
+              
+              // 引力（自己参照的なまとまり）
+              other.vx += (dx / dist) * pullForce;
+              other.vy += (dy / dist) * pullForce;
+
+              // 全体から個への微小なエネルギー分け与え
+              other.vx *= 1.008;
+              other.vy *= 1.008;
+            }
+          }
+        }
+      }
+
+      draw(ctx) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+
+        const alpha = Math.max(0, Math.min(1, this.life));
+        const currentSpeed = this.speed;
+
+        // 速度（運動エネルギー）が高いほど輝きを増す
+        const lightness = Math.min(85, 50 + currentSpeed * 4);
+        
+        if (this.isMerged) {
+          // マクロ存在（ホロン構造）の発光表現
+          const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius * 2);
+          grad.addColorStop(0, `hsla(${this.hue}, 90%, ${lightness}%, ${alpha})`);
+          grad.addColorStop(0.5, `hsla(${this.hue + 20}, 80%, 40%, ${alpha * 0.4})`);
+          grad.addColorStop(1, `hsla(${this.hue}, 100%, 0%, 0)`);
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.radius * 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = `hsla(${this.hue}, 85%, ${lightness}%, ${alpha})`;
+        ctx.shadowColor = `hsla(${this.hue}, 100%, 70%, ${alpha * 0.6})`;
+        ctx.shadowBlur = this.radius * 2;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // ==========================================
+    // 衝突・融合・分解のプロセスコントロール
+    // ==========================================
+    let particles = [];
+
+    function handleCollisionsAndFusion() {
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const p1 = particles[i];
+          const p2 = particles[j];
+
+          const dx = p2.x - p1.x;
+          const dy = p2.y - p1.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const minDist = p1.radius + p2.radius;
+
+          if (dist < minDist) {
+            // 位置補正（めり込み防止）
+            const overlap = minDist - dist;
+            const nx = dx / (dist || 1);
+            const ny = dy / (dist || 1);
+            p1.x -= nx * overlap * 0.5;
+            p1.y -= ny * overlap * 0.5;
+            p2.x += nx * overlap * 0.5;
+            p2.y += ny * overlap * 0.5;
+
+            // 運動エネルギーのやり取り
+            const relativeSpeed = Math.sqrt((p2.vx - p1.vx)**2 + (p2.vy - p1.vy)**2);
+
+            // 融合（一定以上の運動速度＋反応度）
+            if (relativeSpeed > 1.8 / reactivityFactor && p1.cooldown === 0 && p2.cooldown === 0 && (p1.scale + p2.scale < 3.5)) {
+              // 融合体の生成（運動エネルギーのポテンシャル化）
+              const newScale = Math.min(3.2, p1.scale + p2.scale * 0.6);
+              const newHue = (p1.hue + p2.hue) / 2 + 15;
+              const newVx = (p1.vx * p1.scale + p2.vx * p2.scale) / (p1.scale + p2.scale);
+              const newVy = (p1.vy * p1.scale + p2.vy * p2.scale) / (p1.scale + p2.scale);
+
+              const merged = new ChibiParticle(
+                (p1.x + p2.x) / 2,
+                (p1.y + p2.y) / 2,
+                newVx,
+                newVy,
+                newScale,
+                newHue % 360
+              );
+              merged.cooldown = 25;
+
+              // 融合音響のフィードバック
+              triggerSynthSound(200 + merged.scale * 120, 0.4, 0.8);
+
+              // 粒子の置き換え
+              particles.splice(j, 1);
+              particles.splice(i, 1);
+              particles.push(merged);
+              return;
+            } else {
+              // 通常の弾性衝突（熱伝導）
+              const kx = p1.vx - p2.vx;
+              const ky = p1.vy - p2.vy;
+              const p = 2 * (nx * kx + ny * ky) / (p1.scale + p2.scale);
+
+              p1.vx -= p * p2.scale * nx;
+              p1.vy -= p * p2.scale * ny;
+              p2.vx += p * p1.scale * nx;
+              p2.vy += p * p1.scale * ny;
+            }
+          }
+        }
+      }
+    }
+
+    // ----------------------------------------------------
+    // 【追加仕様3: 分解プロセス】ポテンシャルの解放と周囲への波及
+    // ----------------------------------------------------
+    function handleDecomposition() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+
+        if (p.life <= 0) {
+          // 融合粒子（ホロン）が分解する際、溜め込まれたポテンシャルを周囲へ激しい運動として再散逸
+          if (p.isMerged && p.scale > 1.3) {
+            const childCount = Math.floor(p.scale * 2.5);
+            const releaseEnergy = p.scale * 3.5; // 爆発的初速
+
+            triggerSynthSound(120, 0.6, 1.0); // 低音の分解音
+
+            const newChildren = [];
+            for (let c = 0; c < childCount; c++) {
+              const angle = (Math.PI * 2 / childCount) * c + (Math.random() - 0.5) * 0.5;
+              const childVx = Math.cos(angle) * releaseEnergy;
+              const childVy = Math.sin(angle) * releaseEnergy;
+
+              const child = new ChibiParticle(
+                p.x + Math.cos(angle) * p.radius,
+                p.y + Math.sin(angle) * p.radius,
+                childVx,
+                childVy,
+                0.8,
+                (p.hue + Math.random() * 30) % 360
+              );
+              newChildren.push(child);
+            }
+
+            // 周囲の静止粒子（ミクロ）へ衝撃波（運動エネルギー）を分け与える
+            for (let j = 0; j < particles.length; j++) {
+              if (i === j) continue;
+              const other = particles[j];
+              const dx = other.x - p.x;
+              const dy = other.y - p.y;
+              const distSq = dx * dx + dy * dy;
+
+              if (distSq < 220 * 220) {
+                const dist = Math.sqrt(distSq) || 1;
+                const push = (1 - dist / 220) * releaseEnergy * 0.6;
+                other.vx += (dx / dist) * push;
+                other.vy += (dy / dist) * push;
+              }
+            }
+
+            particles.splice(i, 1);
+            particles.push(...newChildren);
+          } else {
+            // 通常粒子の消滅
+            particles.splice(i, 1);
+          }
+        }
+      }
+    }
+
+    // ==========================================
+    // ユーザーインタラクション（エネルギー注入）
+    // ==========================================
+    let isDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    function injectEnergy(x, y, vx, vy) {
+      // クリック/ドラッグによって粒子群に運動エネルギー（命の種火）を与える
+      const spawnCount = Math.floor(2 + Math.random() * 3);
+      for (let i = 0; i < spawnCount; i++) {
+        const spreadAngle = (Math.random() - 0.5) * 0.8;
+        const speed = Math.sqrt(vx * vx + vy * vy) * 0.4 + Math.random() * 2;
+        const angle = Math.atan2(vy, vx) + spreadAngle;
+
+        const p = new ChibiParticle(
+          x + (Math.random() - 0.5) * 20,
+          y + (Math.random() - 0.5) * 20,
+          Math.cos(angle) * speed,
+          Math.sin(angle) * speed,
+          0.9,
+          (Date.now() * 0.05 + Math.random() * 40) % 360
+        );
+        particles.push(p);
+      }
+      triggerSynthSound(400 + Math.random() * 300, 0.15, 0.3);
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      isDragging = true;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+      injectEnergy(e.clientX, e.clientY, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4);
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+      const vx = e.clientX - lastMouseX;
+      const vy = e.clientY - lastMouseY;
+      
+      if (Math.abs(vx) > 2 || Math.abs(vy) > 2) {
+        injectEnergy(e.clientX, e.clientY, vx, vy);
+      }
+
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+    });
+
+    window.addEventListener('pointerup', () => { isDragging = false; });
+
+    // 初期パーティクルの投入
+    for (let i = 0; i < 40; i++) {
+      particles.push(new ChibiParticle(
+        Math.random() * width,
+        Math.random() * height,
+        (Math.random() - 0.5) * 3,
+        (Math.random() - 0.5) * 3,
+        0.8 + Math.random() * 0.4,
+        190 + Math.random() * 60
+      ));
+    }
+
+    // ==========================================
+    // メインアニメーションループ
+    // ==========================================
+    function animate() {
+      // 画面のクリア（余韻が残るトレイル効果）
+      ctx.fillStyle = 'rgba(5, 5, 8, 0.22)';
+      ctx.fillRect(0, 0, width, height);
+
+      // 1. 【追加仕様】運動熱場の時間減衰と背景の微細描画
+      let totalEnergy = 0;
+      for (let x = 0; x < gridCols; x++) {
+        for (let y = 0; y < gridRows; y++) {
+          fieldHeatMap[x][y] *= 0.93; // 熱の散逸
+
+          // 熱が高い領域をうっすらと「場のゆらぎ（風景）」として可視化
+          const heat = fieldHeatMap[x][y];
+          if (heat > 0.8) {
+            ctx.fillStyle = `rgba(99, 102, 241, ${Math.min(0.08, heat * 0.005)})`;
+            ctx.fillRect(x * GRID_SIZE, y * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+          }
+        }
+      }
+
+      // 2. 粒子の更新と描画
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        p.update(particles);
+        p.draw(ctx);
+        totalEnergy += p.speed * p.scale;
+      }
+
+      // 3. 衝突・融合・分解処理
+      handleCollisionsAndFusion();
+      handleDecomposition();
+
+      // UIステータスの更新
+      document.getElementById('stat-count').innerText = particles.length;
+      document.getElementById('stat-energy').innerText = totalEnergy.toFixed(1);
+
+      requestAnimationFrame(animate);
+    }
+
+    animate();
+  </script>
+</body>
+</html>
